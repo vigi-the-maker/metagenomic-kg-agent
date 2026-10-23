@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metagenomic-kg-agent"
+version = "0.1.0"
+description = "A local LangChain and Ollama agent for querying MetagenomicKG via GraphDB"
+requires-python = ">=3.11"
+dependencies = [
+  "requests>=2.31",
+  "python-dotenv>=1.0",
+  "langchain-classic>=1.0",
+  "langchain-core>=1.0",
+  "langchain-ollama>=1.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
