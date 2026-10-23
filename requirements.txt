@@ -1,5 +1,0 @@
-requests>=2.31
-python-dotenv>=1.0
-langchain-classic>=1.0
-langchain-core>=1.0
-langchain-ollama>=1.0
