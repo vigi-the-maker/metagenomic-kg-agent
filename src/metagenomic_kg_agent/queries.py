@@ -6,6 +6,20 @@ from urllib.parse import urlparse
 
 from .graphdb_client import run_sparql
 
+def extract_entity_rank(description: str) -> str | None:
+    """Extract taxonomic rank from the entity description."""
+
+    if not description:
+        return None
+
+    match = re.search(
+        r"""['"]rank['"]\s*,\s*['"]([^'"]+)['"]""",
+        description,
+        re.IGNORECASE,
+    )
+
+    return match.group(1).lower() if match else None
+
 
 def _sparql_string(value: str) -> str:
     """Encode a Python string as a quoted SPARQL string literal."""
@@ -107,6 +121,25 @@ def inspect_entity(entity_uri: str) -> list[dict[str, str]]:
     LIMIT 30
     """
     return run_sparql(query)
+
+def get_entity_rank(entity_uri: str) -> str | None:
+    """Retrieve and extract the taxonomic rank of an entity."""
+
+    metadata = inspect_entity(entity_uri)
+
+    for item in metadata:
+        value = str(item.get("value", ""))
+
+        match = re.search(
+            r"""['"]rank['"]\s*,\s*['"]([^'"]+)['"]""",
+            value,
+            re.IGNORECASE,
+        )
+
+        if match:
+            return match.group(1).lower()
+
+    return None
 
 
 def get_relationships(entity_uri: str, limit: int = 30) -> list[dict[str, str]]:
@@ -260,3 +293,220 @@ def search_entities_flexible(
     """
 
     return run_sparql(query)
+def discover_entity_predicates(
+    entity_uri: str,
+    limit: int = 200,
+) -> list[dict[str, str]]:
+    """Discover all incoming and outgoing predicates associated with an entity."""
+
+    entity = _validate_entity_uri(entity_uri)
+    limit = max(1, min(int(limit), 500))
+
+    query = f"""
+    SELECT DISTINCT
+        ?direction
+        ?predicate
+        ?predicate_name
+    WHERE {{
+        {{
+            {entity} ?predicate ?related_entity .
+            BIND("outgoing" AS ?direction)
+        }}
+        UNION
+        {{
+            ?related_entity ?predicate {entity} .
+            BIND("incoming" AS ?direction)
+        }}
+
+        BIND(
+            REPLACE(STR(?predicate), "^.*[/#]", "")
+            AS ?predicate_name
+        )
+    }}
+    LIMIT {limit}
+    """
+
+    return run_sparql(query)
+
+def get_hierarchy_neighbors(
+    entity_uri: str,
+    entity_rank: str,
+    limit: int = 500,
+) -> list[dict[str, str]]:
+    """
+    Retrieve hierarchy neighbours based on the taxonomic rank.
+
+    Species -> superclass_of -> strains
+    Strain  -> subclass_of   -> parent species
+    """
+
+    entity = _validate_entity_uri(entity_uri)
+
+    rank = entity_rank.strip().lower()
+
+    hierarchy_map = {
+        "species": {
+            "predicate": "superclass_of",
+            "direction": "outgoing",
+        },
+        "strain": {
+            "predicate": "subclass_of",
+            "direction": "outgoing",
+        },
+    }
+
+    if rank not in hierarchy_map:
+        return []
+
+    hierarchy_predicate = hierarchy_map[rank]["predicate"]
+
+    limit = max(1, min(int(limit), 1000))
+
+    query = f"""
+    PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>
+
+    SELECT DISTINCT
+        ?hierarchy_predicate
+        ?related_entity
+        ?related_label
+        ?related_description
+
+    WHERE {{
+        {entity} ?hierarchy_predicate ?related_entity .
+
+        BIND(
+            REPLACE(
+                STR(?hierarchy_predicate),
+                "^.*[/#]",
+                ""
+            ) AS ?predicate_name
+        )
+
+        FILTER(?predicate_name = "{hierarchy_predicate}")
+
+        OPTIONAL {{
+            ?related_entity rdfs:label ?related_label .
+        }}
+
+        OPTIONAL {{
+            ?related_entity rdfs:comment ?related_description .
+        }}
+    }}
+
+    LIMIT {limit}
+    """
+
+    return run_sparql(query)
+def get_hierarchy_aware_relationships(
+    entity_uri: str,
+    predicates: list[str],
+    category: str,
+    limit: int = 30,
+    max_neighbors: int = 500,
+) -> dict:
+    """
+    Retrieve direct relationships first.
+
+    If none exist, explore hierarchy neighbours according
+    to the entity's taxonomic rank.
+    """
+    entity_rank = get_entity_rank(entity_uri)
+
+    if not entity_rank:
+        return {
+        "requested_entity_uri": entity_uri,
+        "entity_rank": None,
+        "category": category,
+        "retrieval_level": "none",
+        "error": "Could not determine the entity's taxonomic rank.",
+        "relationships": [],
+        }
+
+    # Step 1: Discover direct predicates.
+    direct_predicates = discover_entity_predicates(entity_uri)
+
+    # Step 2: Search for direct relationships.
+    direct_results = get_relationships_by_predicates(
+        entity_uri=entity_uri,
+        predicates=predicates,
+        limit=limit,
+    )
+
+    if direct_results:
+        for result in direct_results:
+            result["retrieval_level"] = "direct"
+            result["requested_entity_uri"] = entity_uri
+            result["relationship_source_uri"] = entity_uri
+
+        return {
+            "requested_entity_uri": entity_uri,
+            "entity_rank": entity_rank,
+            "category": category,
+            "retrieval_level": "direct",
+            "direct_predicates": direct_predicates,
+            "searched_neighbors": [],
+            "relationships": direct_results,
+        }
+
+    # Step 3: Explore hierarchy according to entity rank.
+    neighbors = get_hierarchy_neighbors(
+        entity_uri=entity_uri,
+        entity_rank=entity_rank,
+        limit=max_neighbors,
+    )
+
+    relationships = []
+    searched_neighbors = []
+
+    visited = set()
+
+    # Step 4: Search each hierarchy neighbour.
+    for neighbor in neighbors:
+
+        related_uri = neighbor.get("related_entity")
+
+        if not related_uri or related_uri in visited:
+            continue
+
+        visited.add(related_uri)
+
+        searched_neighbors.append({
+            "entity_uri": related_uri,
+            "label": neighbor.get("related_label"),
+            "description": neighbor.get("related_description"),
+            "hierarchy_predicate": neighbor.get(
+                "hierarchy_predicate"
+            ),
+        })
+
+        neighbor_results = get_relationships_by_predicates(
+            entity_uri=related_uri,
+            predicates=predicates,
+            limit=limit,
+        )
+
+        # Step 5: Preserve relationship provenance.
+        for result in neighbor_results:
+            result["retrieval_level"] = "hierarchy_neighbor"
+            result["requested_entity_uri"] = entity_uri
+            result["relationship_source_uri"] = related_uri
+            result["hierarchy_predicate"] = neighbor.get(
+                "hierarchy_predicate"
+            )
+            result["hierarchy_source_label"] = neighbor.get(
+                "related_label"
+            )
+
+            relationships.append(result)
+
+    return {
+        "requested_entity_uri": entity_uri,
+        "entity_rank": entity_rank,
+        "category": category,
+        "retrieval_level": (
+            "hierarchy_neighbor" if relationships else "none"
+        ),
+        "direct_predicates": direct_predicates,
+        "searched_neighbors": searched_neighbors,
+        "relationships": relationships,
+    }

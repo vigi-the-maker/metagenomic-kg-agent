@@ -1,49 +1,92 @@
-"""Command-line entry point for the MetagenomicKG agent."""
-
 import argparse
-import sys
+import uuid
 
-from metagenomic_kg_agent.agent import build_agent
+from langchain_core.messages import HumanMessage
+from metagenomic_kg_agent.workflow.graph import build_workflow
 
 
-def main() -> int:
+def main():
+
     parser = argparse.ArgumentParser(
-        description="Ask questions about MetagenomicKG using GraphDB and Ollama."
+        description="MetagenomicKG Multi-Agent Framework"
     )
+
     parser.add_argument(
         "question",
         nargs="*",
-        help="Question to ask. Omit it to start an interactive session.",
+        help="Question to ask the multi-agent framework"
     )
-    parser.add_argument("--verbose", action="store_true", help="Show agent tool reasoning/logs.")
+
+    parser.add_argument(
+        "--verbose",
+        action="store_true"
+    )
+
+    parser.add_argument(
+        "--thread-id",
+        default=None,
+        help="Conversation thread ID"
+    )
+
     args = parser.parse_args()
 
-    agent = build_agent(verbose=args.verbose)
+    app = build_workflow()
+
+    thread_id = args.thread_id or str(uuid.uuid4())
+
+    config = {
+        "configurable": {
+            "thread_id": thread_id
+        }
+    }
+
     question = " ".join(args.question).strip()
 
+    print(f"\nConversation ID: {thread_id}")
+
     if question:
-        result = agent.invoke({"input": question})
-        print(result.get("output", result))
+
+        result = app.invoke(
+            {
+                "messages": [
+                    HumanMessage(content=question)
+                ]
+            },
+            config=config
+        )
+
+        print("\nAssistant:")
+        print(result.get("final_response", "No response generated."))
+
         return 0
 
-    print("MetagenomicKG assistant. Type 'exit' or 'quit' to stop.")
+    print("\nMetagenomicKG Multi-Agent Framework")
+    print("Type 'exit' to quit.\n")
+
     while True:
-        try:
-            question = input("\nYou: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nGoodbye.")
-            return 0
-        if question.lower() in {"exit", "quit"}:
-            print("Goodbye.")
-            return 0
+
+        question = input("You: ").strip()
+
+        if question.lower() in ["exit", "quit"]:
+            break
+
         if not question:
             continue
-        try:
-            result = agent.invoke({"input": question})
-            print(f"\nAssistant: {result.get('output', result)}")
-        except Exception as exc:
-            print(f"\nError: {exc}", file=sys.stderr)
-            print("Check that GraphDB and Ollama are running and configured correctly.")
+
+        result = app.invoke(
+            {
+                "messages": [
+                    HumanMessage(content=question)
+                ]
+            },
+            config=config
+        )
+
+        print("\nAssistant:")
+        print(result.get("final_response", "No response generated."))
+        print()
+
+    return 0
 
 
 if __name__ == "__main__":

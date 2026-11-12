@@ -14,10 +14,15 @@ import json
 
 from langchain_core.tools import tool
 
+from .MGMLink_Client import MGMLinkTools
+
 from .queries import (
     search_entities_detailed,
     get_relationships_by_predicates,
     search_entities_flexible,
+    discover_entity_predicates,
+    get_hierarchy_neighbors,
+    get_hierarchy_aware_relationships,
 )
 
 
@@ -112,7 +117,7 @@ def _get_category_relationships(
     category: str,
     limit: int = 30,
 ) -> str:
-    """Retrieve relationships for an entity within a predicate category."""
+    """Retrieve direct relationships, with hierarchy-aware fallback."""
 
     if not entity_uri or not entity_uri.strip():
         return "Error: entity_uri cannot be empty."
@@ -123,27 +128,37 @@ def _get_category_relationships(
     predicates = PREDICATE_CATEGORIES[category]
 
     try:
-        results = get_relationships_by_predicates(
-            entity_uri=entity_uri.strip(),
-            predicates=predicates,
-            limit=limit,
+        results = get_hierarchy_aware_relationships(
+        entity_uri=entity_uri.strip(),
+        predicates=predicates,
+        category=category,
+        limit=limit,
+        max_neighbors=500,
         )
 
-        if not results:
-            return (
-                f"No relationships found for URI: {entity_uri}\n"
-                f"Predicate category: {category}\n"
-                f"Predicates checked: {', '.join(predicates)}"
-            )
+        if not results["relationships"]:
+            return json.dumps({
+                "status": "no_relationships_found",
+                "requested_entity_uri": entity_uri,
+                "category": category,
+                "predicates_checked": predicates,
+                "direct_predicates": results["direct_predicates"],
+                "searched_neighbors": results["searched_neighbors"],
+                "relationships": [],
+            }, indent=2, ensure_ascii=False)
 
-        return _format_results(results)
+        return json.dumps(
+            results,
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        )
 
     except Exception as exc:
         return (
             f"Error retrieving relationships for URI '{entity_uri}' "
             f"in category '{category}': {exc}"
         )
-
 
 # ============================================================
 # TOOL 1: SEARCH ENTITIES
@@ -372,8 +387,57 @@ def get_metadata_provenance_tool(entity_uri: str) -> str:
         entity_uri=entity_uri,
         category="metadata_provenance",
     )
+# ============================================================
+# MGMLINK TOOLS
+# ============================================================
+# Initialise MGMLink client
+mgmlink = MGMLinkTools()
+@tool
+def get_metabolites_for_microbe_tool(microbe: str) -> str:
+    """
+    Find metabolites associated with a microorganism
+    using the MGMLink knowledge graph.
+    """
+
+    print(f"\n[MGMLink] Searching metabolites for: {microbe}")
+
+    results = mgmlink.get_metabolites_for_microbe(microbe)
+
+    print(f"[MGMLink] Results retrieved: {len(results)}")
+
+    if results.empty:
+        return json.dumps({
+            "status": "success",
+            "graph": "MGMLink",
+            "message": "No metabolites found.",
+            "results": []
+        })
+
+    return results.to_json(orient="records")
 
 
+@tool
+def get_microbes_for_metabolite_tool(metabolite: str) -> str:
+    """
+    Find microorganisms associated with a metabolite
+    using the MGMLink knowledge graph.
+    """
+
+    print(f"\n[MGMLink] Searching microbes for: {metabolite}")
+
+    results = mgmlink.get_microbes_for_metabolite(metabolite)
+
+    print(f"[MGMLink] Results retrieved: {len(results)}")
+
+    if results.empty:
+        return json.dumps({
+            "status": "success",
+            "graph": "MGMLink",
+            "message": "No microbes found.",
+            "results": []
+        })
+
+    return results.to_json(orient="records")
 # ============================================================
 # REGISTER TOOLS
 # ============================================================
@@ -386,4 +450,8 @@ TOOLS = [
     get_disease_phenotype_treatment_tool,
     get_process_composition_location_tool,
     get_metadata_provenance_tool,
+     # MGMLink
+    get_metabolites_for_microbe_tool,
+    get_microbes_for_metabolite_tool,
+
 ]
